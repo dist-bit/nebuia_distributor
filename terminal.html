@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR DIsstributor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --border-color: #334155;
+            --success: #22c55e;
+            --error: #ef4444;
+            --info: #3b82f6;
+            --warning: #f59e0b;
+            --waiting: #06b6d4;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            line-height: 1.5;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: var(--bg-secondary);
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .title {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .stats {
+            display: flex;
+            gap: 1.5rem;
+            font-size: 0.875rem;
+        }
+
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+        }
+
+        .stat-value {
+            font-weight: 500;
+        }
+
+        main {
+            flex: 1;
+            padding: 1.5rem;
+            display: flex;
+            gap: 1.5rem;
+            overflow: hidden;
+        }
+
+        #terminal-container {
+            flex: 1;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .terminal-header {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .terminal-title {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .terminal-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .terminal-btn {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 0.25rem 0.75rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .terminal-btn:hover {
+            background: var(--border-color);
+            color: var(--text-primary);
+        }
+
+        #terminal {
+            flex: 1;
+            padding: 1rem;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            background: var(--bg-primary);
+            border-radius: 0 0 0.5rem 0.5rem;
+        }
+
+        .log-line {
+            margin: 0;
+            padding: 0.25rem 0;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            opacity: 0;
+            animation: fadeIn 0.2s ease-in forwards;
+        }
+
+        .log-line:hover {
+            background: var(--bg-secondary);
+        }
+
+        .timestamp {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            min-width: 70px;
+        }
+
+        .log-content {
+            flex: 1;
+            word-break: break-word;
+        }
+
+        .success { color: var(--success); }
+        .error { color: var(--error); }
+        .info { color: var(--info); }
+        .warning { color: var(--warning); }
+        .waiting { color: var(--waiting); }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-primary);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-secondary);
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            header {
+                flex-direction: column;
+                gap: 1rem;
+                align-items: flex-start;
+            }
+
+            .stats {
+                flex-wrap: wrap;
+            }
+
+            main {
+                padding: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="title">PDF Processor Dashboard</div>
+        <div class="stats">
+            <div class="stat-item">
+                <span class="stat-label">Processed:</span>
+                <span class="stat-value" id="processed-count">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Pending:</span>
+                <span class="stat-value" id="pending-count">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Success Rate:</span>
+                <span class="stat-value" id="success-rate">0%</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Status:</span>
+                <span class="stat-value" id="system-status">Running</span>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <div id="terminal-container">
+            <div class="terminal-header">
+                <span class="terminal-title">System Logs</span>
+                <div class="terminal-actions">
+                    <button class="terminal-btn" id="clear-logs">Clear</button>
+                    <button class="terminal-btn" id="toggle-autoscroll">Auto-scroll</button>
+                </div>
+            </div>
+            <div id="terminal"></div>
+        </div>
+    </main>
+
+    <script>
+        const terminal = document.getElementById('terminal');
+        const ws = new WebSocket('ws://' + window.location.host + '/ws');
+        let autoScroll = true;
+        let processedCount = 0;
+        let pendingCount = 0;
+        let successCount = 0;
+        let totalProcessed = 0;
+
+        function getColorClass(line) {
+            if (line.includes('SUCCESS')) return 'success';
+            if (line.includes('ERROR')) return 'error';
+            if (line.includes('INFO')) return 'info';
+            if (line.includes('WAITING')) return 'waiting';
+            if (line.includes('REJECTED')) return 'warning';
+            return '';
+        }
+
+        function updateStats() {
+            document.getElementById('processed-count').textContent = totalProcessed;
+            document.getElementById('pending-count').textContent = pendingCount;
+            const successRate = totalProcessed > 0 ? Math.round((successCount / totalProcessed) * 100) : 0;
+            document.getElementById('success-rate').textContent = `${successRate}%`;
+        }
+
+        function addLogLine(message) {
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString('en-US', { 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
+
+            const logLine = document.createElement('div');
+            logLine.className = `log-line ${getColorClass(message)}`;
+            
+            const timestampSpan = document.createElement('span');
+            timestampSpan.className = 'timestamp';
+            timestampSpan.textContent = timestamp;
+            
+            const contentSpan = document.createElement('span');
+            contentSpan.className = 'log-content';
+            contentSpan.textContent = message;
+
+            logLine.appendChild(timestampSpan);
+            logLine.appendChild(contentSpan);
+            terminal.appendChild(logLine);
+
+            if (autoScroll) {
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+
+            // Update stats based on log content
+            if (message.includes('SUCCESS')) {
+                successCount++;
+                totalProcessed++;
+            } else if (message.includes('ERROR')) {
+                totalProcessed++;
+            } else if (message.includes('WAITING')) {
+                pendingCount++;
+            } else if (message.includes('Processed:')) {
+                const match = message.match(/Processed: (\d+), Pending: (\d+)/);
+                if (match) {
+                    totalProcessed = parseInt(match[1]);
+                    pendingCount = parseInt(match[2]);
+                }
+            }
+
+            updateStats();
+        }
+
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.type === 'log') {
+                addLogLine(data.message);
+            }
+        };
+
+        ws.onclose = function() {
+            addLogLine('Connection closed. Please refresh the page.');
+            document.getElementById('system-status').textContent = 'Disconnected';
+            document.getElementById('system-status').style.color = 'var(--error)';
+        };
+
+        // Event Listeners
+        document.getElementById('clear-logs').addEventListener('click', () => {
+            terminal.innerHTML = '';
+        });
+
+        document.getElementById('toggle-autoscroll').addEventListener('click', (e) => {
+            autoScroll = !autoScroll;
+            e.target.style.background = autoScroll ? 'var(--border-color)' : 'transparent';
+            e.target.style.color = autoScroll ? 'var(--text-primary)' : 'var(--text-secondary)';
+        });
+
+        // Initialize auto-scroll button state
+        document.getElementById('toggle-autoscroll').style.background = 'var(--border-color)';
+        document.getElementById('toggle-autoscroll').style.color = 'var(--text-primary)';
+    </script>
+</body>
+</html>
