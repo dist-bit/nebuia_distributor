@@ -242,18 +242,20 @@ func (t *LiveDocumentTracker) Stop() {
 }
 
 type PDFProcessorClient struct {
-	servers          []string
-	timeout          time.Duration
-	pollInterval     time.Duration
-	pendingDocuments map[string]Document
-	processLock      sync.Mutex
-	isRunning        bool
-	serverStats      map[string]ServerStats
-	documentAttempts map[string]int
-	tracker          *LiveDocumentTracker
-	processedUUIDs   map[string]bool
-	mongoClient      *mongo.Client
-	serverHealth     map[string]*ServerHealth
+	servers            []string
+	timeout            time.Duration
+	pollInterval       time.Duration
+	pendingDocuments   map[string]Document
+	processLock        sync.Mutex
+	isRunning          bool
+	serverStats        map[string]ServerStats
+	documentAttempts   map[string]int
+	tracker            *LiveDocumentTracker
+	processedUUIDs     map[string]bool
+	mongoClient        *mongo.Client
+	serverHealth       map[string]*ServerHealth
+	currentServerIndex int
+	serverMutex        sync.Mutex
 }
 
 func NewPDFProcessorClient(servers []string, timeout, pollInterval time.Duration) *PDFProcessorClient {
@@ -270,17 +272,38 @@ func NewPDFProcessorClient(servers []string, timeout, pollInterval time.Duration
 	}
 
 	return &PDFProcessorClient{
-		servers:          servers,
-		timeout:          timeout,
-		pollInterval:     pollInterval,
-		pendingDocuments: make(map[string]Document),
-		serverStats:      serverStats,
-		serverHealth:     serverHealth,
-		documentAttempts: make(map[string]int),
-		tracker:          NewLiveDocumentTracker(),
-		processedUUIDs:   make(map[string]bool),
-		isRunning:        true,
+		servers:            servers,
+		timeout:            timeout,
+		pollInterval:       pollInterval,
+		pendingDocuments:   make(map[string]Document),
+		serverStats:        serverStats,
+		serverHealth:       serverHealth,
+		documentAttempts:   make(map[string]int),
+		tracker:            NewLiveDocumentTracker(),
+		processedUUIDs:     make(map[string]bool),
+		isRunning:          true,
+		currentServerIndex: 0,
 	}
+}
+
+func (c *PDFProcessorClient) selectNextServer() string {
+	c.serverMutex.Lock()
+	defer c.serverMutex.Unlock()
+
+	initialIndex := c.currentServerIndex
+	serversCount := len(c.servers)
+
+	for i := 0; i < serversCount; i++ {
+		server := c.servers[c.currentServerIndex]
+		c.currentServerIndex = (c.currentServerIndex + 1) % serversCount
+
+		if c.checkServerHealth(server) {
+			return server
+		}
+	}
+
+	c.currentServerIndex = initialIndex
+	return ""
 }
 
 func (c *PDFProcessorClient) checkServerHealth(serverURL string) bool {
@@ -443,25 +466,60 @@ func (c *PDFProcessorClient) tryProcessDocument(doc Document, serverURL string) 
 }
 
 func (c *PDFProcessorClient) processDocumentWithRotation(doc Document) bool {
-	allServersFull := true
+	serversCount := len(c.servers)
+	serversTried := make(map[string]bool)
 
-	for _, server := range c.servers {
+	for len(serversTried) < serversCount {
+		server := c.selectNextServer()
+		if server == "" {
+			c.logStatus(
+				doc.UUID,
+				"WAITING",
+				"No healthy servers available - Document queued for retry",
+			)
+			return false
+		}
+
+		if serversTried[server] {
+			continue
+		}
+
 		success, serverFull := c.tryProcessDocument(doc, server)
+		serversTried[server] = true
+
 		if success {
 			return true
 		}
-		if !serverFull {
-			allServersFull = false
+
+		if serverFull {
+			continue
 		}
+
+		time.Sleep(c.pollInterval)
 	}
 
-	if allServersFull {
-		c.logStatus(
-			doc.UUID,
-			"WAITING",
-			"All servers at capacity - Document queued for retry",
-		)
-		return false
+	if len(serversTried) == serversCount {
+		allFull := true
+		for server := range serversTried {
+			if stats := c.serverStats[server]; stats.capacityFull == 0 {
+				allFull = false
+				break
+			}
+		}
+
+		if allFull {
+			c.logStatus(
+				doc.UUID,
+				"WAITING",
+				"All servers at capacity - Document queued for retry",
+			)
+		} else {
+			c.logStatus(
+				doc.UUID,
+				"ERROR",
+				"All servers attempted - Document will be retried later",
+			)
+		}
 	}
 
 	return false
@@ -807,7 +865,9 @@ func main() {
 	}
 
 	servers := []string{
-		// add servers
+		"https://ocr4-service.nebuia.com",
+		"https://ocr2-service.nebuia.com",
+		"https://ocr-service.nebuia.com",
 	}
 
 	processor := NewPDFProcessorClient(servers, 30*time.Second, 10*time.Second)
