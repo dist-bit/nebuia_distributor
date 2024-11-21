@@ -528,103 +528,89 @@ func (c *PDFProcessorClient) processDocumentWithRotation(doc Document) bool {
 func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 	c.tracker.Start()
 
-	c.logStatus(
-		"SYSTEM",
-		"INFO",
-		fmt.Sprintf("Starting PDF processor with %d servers", len(c.servers)),
-	)
-
-	for _, server := range c.servers {
-		c.logStatus(
-			"SYSTEM",
-			"INFO",
-			fmt.Sprintf("Configured server: %s", server),
-		)
-	}
-
-	c.logStatus(
-		"SYSTEM",
-		"INFO",
-		fmt.Sprintf("Search interval: %d seconds", CheckNewDocsInterval),
-	)
+	c.logStatus("SYSTEM", "INFO", fmt.Sprintf("Starting PDF processor with %d servers", len(c.servers)))
 
 	var wg sync.WaitGroup
+	processingChan := make(chan Document, 100) // Buffer channel for documents
 
+	// Document finder goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ticker := time.NewTicker(CheckNewDocsInterval * time.Second)
 		defer ticker.Stop()
 
-		c.logStatus(
-			"SYSTEM",
-			"INFO",
-			"Document monitor started - Searching for pending documents...",
-		)
-
-		if docs, err := c.getBatchToWork(); err == nil {
-			if len(docs) > 0 {
-				c.logStatus(
-					"SYSTEM",
-					"INFO",
-					fmt.Sprintf("Found %d pending documents", len(docs)),
-				)
-				c.addDocumentsToQueue(docs)
-			} else {
-				c.logStatus(
-					"SYSTEM",
-					"INFO",
-					"No pending documents found",
-				)
+		processNewDocuments := func() {
+			docs, err := c.getBatchToWork()
+			if err != nil {
+				c.logStatus("SYSTEM", "ERROR", fmt.Sprintf("Error fetching documents: %v", err))
+				return
 			}
-		} else {
-			c.logStatus(
-				"SYSTEM",
-				"ERROR",
-				fmt.Sprintf("Error in initial search: %v", err),
-			)
+
+			if len(docs) > 0 {
+				c.logStatus("SYSTEM", "INFO", fmt.Sprintf("Found %d new documents", len(docs)))
+				for _, doc := range docs {
+					if !c.processedUUIDs[doc.UUID] {
+						processingChan <- doc
+					}
+				}
+			}
 		}
+
+		// Initial document check
+		processNewDocuments()
 
 		for {
 			select {
 			case <-ctx.Done():
-				c.logStatus(
-					"SYSTEM",
-					"INFO",
-					"Stopping document monitor...",
-				)
 				return
 			case <-ticker.C:
 				if !c.isRunning {
 					return
 				}
-
-				/*c.logStatus(
-					"SYSTEM",
-					"INFO",
-					"Searching for new documents...",
-				)*/
-
-				if docs, err := c.getBatchToWork(); err == nil {
-					if len(docs) > 0 {
-						c.logStatus(
-							"SYSTEM",
-							"INFO",
-							fmt.Sprintf("Found %d new documents", len(docs)),
-						)
-						c.addDocumentsToQueue(docs)
-					}
-				} else {
-					/*c.logStatus(
-						"SYSTEM",
-						"ERROR",
-						fmt.Sprintf("Error searching for new documents: %v", err),
-					) */
-				}
+				processNewDocuments()
 			}
 		}
 	}()
 
+	// Document processor goroutines
+	const numProcessors = 3
+	for i := 0; i < numProcessors; i++ {
+		wg.Add(1)
+		go func(processorID int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case doc, ok := <-processingChan:
+					if !ok {
+						return
+					}
+
+					c.processLock.Lock()
+					if c.processedUUIDs[doc.UUID] {
+						c.processLock.Unlock()
+						continue
+					}
+					c.processLock.Unlock()
+
+					success := c.processDocumentWithRotation(doc)
+					if !success {
+						// Requeue document if processing failed
+						select {
+						case processingChan <- doc:
+						default:
+							c.logStatus(doc.UUID, "ERROR", "Failed to requeue document - channel full")
+						}
+						time.Sleep(c.pollInterval)
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Stats reporter goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -644,14 +630,12 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 				totalProcessed := 0
 				totalPending := len(c.pendingDocuments)
 				totalAtCapacity := 0
-				serverStats := make(map[string]ServerStats)
 
-				for server, stats := range c.serverStats {
+				for _, stats := range c.serverStats {
 					totalProcessed += stats.processed
 					if stats.capacityFull > 0 {
 						totalAtCapacity++
 					}
-					serverStats[server] = stats
 				}
 				c.processLock.Unlock()
 
@@ -662,7 +646,7 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 						totalProcessed, totalPending, totalAtCapacity, len(c.servers)),
 				)
 
-				for server, stats := range serverStats {
+				for server, stats := range c.serverStats {
 					serverName := server[strings.LastIndex(server, "/")+1:]
 					c.logStatus(
 						"STATS",
@@ -675,40 +659,7 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 		}
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		processTicker := time.NewTicker(100 * time.Millisecond)
-		defer processTicker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-processTicker.C:
-				if !c.isRunning {
-					return
-				}
-
-				c.processLock.Lock()
-				pendingDocs := make([]Document, 0)
-				for _, doc := range c.pendingDocuments {
-					if !c.processedUUIDs[doc.UUID] {
-						pendingDocs = append(pendingDocs, doc)
-					}
-				}
-				c.processLock.Unlock()
-
-				for _, doc := range pendingDocs {
-					success := c.processDocumentWithRotation(doc)
-					if !success {
-						time.Sleep(c.pollInterval)
-					}
-				}
-			}
-		}
-	}()
-
+	// Health checker goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -725,9 +676,8 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 				}
 
 				for _, server := range c.servers {
-					isHealthy := c.checkServerHealth(server)
-					serverName := server[strings.LastIndex(server, "/")+1:]
-					if !isHealthy {
+					if !c.checkServerHealth(server) {
+						serverName := server[strings.LastIndex(server, "/")+1:]
 						c.logStatus(
 							"SYSTEM",
 							"WARNING",
@@ -738,14 +688,12 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 			}
 		}
 	}()
+
 	<-ctx.Done()
-	c.logStatus(
-		"SYSTEM",
-		"INFO",
-		"Shutdown signal received. Stopping processors...",
-	)
+	c.logStatus("SYSTEM", "INFO", "Shutdown signal received. Stopping processors...")
 
 	c.isRunning = false
+	close(processingChan)
 
 	done := make(chan struct{})
 	go func() {
@@ -755,17 +703,9 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 
 	select {
 	case <-done:
-		c.logStatus(
-			"SYSTEM",
-			"INFO",
-			"All processors stopped successfully",
-		)
+		c.logStatus("SYSTEM", "INFO", "All processors stopped successfully")
 	case <-time.After(10 * time.Second):
-		c.logStatus(
-			"SYSTEM",
-			"WARNING",
-			"Forced shutdown due to timeout",
-		)
+		c.logStatus("SYSTEM", "WARNING", "Forced shutdown due to timeout")
 	}
 
 	c.tracker.Stop()
