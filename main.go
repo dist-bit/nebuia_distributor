@@ -555,23 +555,23 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 
 				if len(docs) > 0 {
 					c.logStatus("SYSTEM", "INFO", fmt.Sprintf("Found %d new documents", len(docs)))
-					c.processLock.Lock()
+
 					for _, doc := range docs {
+						c.processLock.Lock()
 						if !c.processedUUIDs[doc.UUID] {
 							c.pendingDocuments[doc.UUID] = doc
 							c.documentAttempts[doc.UUID] = 0
 							c.logStatus(doc.UUID, "WAITING", "Document queued for processing")
 						}
+						c.processLock.Unlock()
 					}
-					c.processLock.Unlock()
+
 				}
 			}
 		}
 	}()
 
 	// Document processor goroutine
-	pendingDocs := make([]Document, 0)
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -588,7 +588,7 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 				}
 
 				c.processLock.Lock()
-
+				pendingDocs := make([]Document, 0)
 				for _, doc := range c.pendingDocuments {
 					if !c.processedUUIDs[doc.UUID] {
 						pendingDocs = append(pendingDocs, doc)
@@ -604,11 +604,14 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 					}
 					c.processLock.Unlock()
 
-					c.processDocumentWithRotation(doc)
-					c.processLock.Lock()
-					delete(c.pendingDocuments, doc.UUID)
-					c.processLock.Unlock()
-
+					success := c.processDocumentWithRotation(doc)
+					if success {
+						c.processLock.Lock()
+						delete(c.pendingDocuments, doc.UUID)
+						c.processLock.Unlock()
+					} else {
+						time.Sleep(c.pollInterval)
+					}
 				}
 			}
 		}
