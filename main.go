@@ -531,7 +531,6 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 	c.logStatus("SYSTEM", "INFO", fmt.Sprintf("Starting PDF processor with %d servers", len(c.servers)))
 
 	var wg sync.WaitGroup
-	processingChan := make(chan Document, 100) // Buffer channel for documents
 
 	// Document finder goroutine
 	wg.Add(1)
@@ -539,26 +538,6 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 		defer wg.Done()
 		ticker := time.NewTicker(CheckNewDocsInterval * time.Second)
 		defer ticker.Stop()
-
-		processNewDocuments := func() {
-			docs, err := c.getBatchToWork()
-			if err != nil {
-				c.logStatus("SYSTEM", "ERROR", fmt.Sprintf("Error fetching documents: %v", err))
-				return
-			}
-
-			if len(docs) > 0 {
-				c.logStatus("SYSTEM", "INFO", fmt.Sprintf("Found %d new documents", len(docs)))
-				for _, doc := range docs {
-					if !c.processedUUIDs[doc.UUID] {
-						processingChan <- doc
-					}
-				}
-			}
-		}
-
-		// Initial document check
-		processNewDocuments()
 
 		for {
 			select {
@@ -568,26 +547,56 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 				if !c.isRunning {
 					return
 				}
-				processNewDocuments()
+
+				docs, err := c.getBatchToWork()
+				if err != nil {
+					continue
+				}
+
+				if len(docs) > 0 {
+					c.logStatus("SYSTEM", "INFO", fmt.Sprintf("Found %d new documents", len(docs)))
+					c.processLock.Lock()
+					for _, doc := range docs {
+						if !c.processedUUIDs[doc.UUID] {
+							c.pendingDocuments[doc.UUID] = doc
+							c.documentAttempts[doc.UUID] = 0
+							c.logStatus(doc.UUID, "WAITING", "Document queued for processing")
+						}
+					}
+					c.processLock.Unlock()
+				}
 			}
 		}
 	}()
 
-	// Document processor goroutines
-	const numProcessors = 3
-	for i := 0; i < numProcessors; i++ {
-		wg.Add(1)
-		go func(processorID int) {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case doc, ok := <-processingChan:
-					if !ok {
-						return
-					}
+	// Document processor goroutine
+	pendingDocs := make([]Document, 0)
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		processTicker := time.NewTicker(500 * time.Millisecond)
+		defer processTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-processTicker.C:
+				if !c.isRunning {
+					return
+				}
+
+				c.processLock.Lock()
+
+				for _, doc := range c.pendingDocuments {
+					if !c.processedUUIDs[doc.UUID] {
+						pendingDocs = append(pendingDocs, doc)
+					}
+				}
+				c.processLock.Unlock()
+
+				for _, doc := range pendingDocs {
 					c.processLock.Lock()
 					if c.processedUUIDs[doc.UUID] {
 						c.processLock.Unlock()
@@ -596,21 +605,19 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 					c.processLock.Unlock()
 
 					success := c.processDocumentWithRotation(doc)
-					if !success {
-						// Requeue document if processing failed
-						select {
-						case processingChan <- doc:
-						default:
-							c.logStatus(doc.UUID, "ERROR", "Failed to requeue document - channel full")
-						}
+					if success {
+						c.processLock.Lock()
+						delete(c.pendingDocuments, doc.UUID)
+						c.processLock.Unlock()
+					} else {
 						time.Sleep(c.pollInterval)
 					}
 				}
 			}
-		}(i)
-	}
+		}
+	}()
 
-	// Stats reporter goroutine
+	// Stats reporter goroutine - same as before
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -630,12 +637,14 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 				totalProcessed := 0
 				totalPending := len(c.pendingDocuments)
 				totalAtCapacity := 0
+				serverStats := make(map[string]ServerStats)
 
-				for _, stats := range c.serverStats {
+				for server, stats := range c.serverStats {
 					totalProcessed += stats.processed
 					if stats.capacityFull > 0 {
 						totalAtCapacity++
 					}
+					serverStats[server] = stats
 				}
 				c.processLock.Unlock()
 
@@ -646,7 +655,7 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 						totalProcessed, totalPending, totalAtCapacity, len(c.servers)),
 				)
 
-				for server, stats := range c.serverStats {
+				for server, stats := range serverStats {
 					serverName := server[strings.LastIndex(server, "/")+1:]
 					c.logStatus(
 						"STATS",
@@ -659,41 +668,10 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 		}
 	}()
 
-	// Health checker goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		healthTicker := time.NewTicker(30 * time.Second)
-		defer healthTicker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-healthTicker.C:
-				if !c.isRunning {
-					return
-				}
-
-				for _, server := range c.servers {
-					if !c.checkServerHealth(server) {
-						serverName := server[strings.LastIndex(server, "/")+1:]
-						c.logStatus(
-							"SYSTEM",
-							"WARNING",
-							fmt.Sprintf("Server %s is unhealthy", serverName),
-						)
-					}
-				}
-			}
-		}
-	}()
-
 	<-ctx.Done()
 	c.logStatus("SYSTEM", "INFO", "Shutdown signal received. Stopping processors...")
 
 	c.isRunning = false
-	close(processingChan)
 
 	done := make(chan struct{})
 	go func() {
