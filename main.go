@@ -604,14 +604,11 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 					}
 					c.processLock.Unlock()
 
-					success := c.processDocumentWithRotation(doc)
-					if success {
-						c.processLock.Lock()
-						delete(c.pendingDocuments, doc.UUID)
-						c.processLock.Unlock()
-					} else {
-						time.Sleep(c.pollInterval)
-					}
+					c.processDocumentWithRotation(doc)
+					c.processLock.Lock()
+					delete(c.pendingDocuments, doc.UUID)
+					c.processLock.Unlock()
+
 				}
 			}
 		}
