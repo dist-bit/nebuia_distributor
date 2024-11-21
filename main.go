@@ -333,28 +333,6 @@ func (c *PDFProcessorClient) checkServerHealth(serverURL string) bool {
 	return health.Healthy
 }
 
-func (c *PDFProcessorClient) addDocumentsToQueue(documents []Document) {
-	if len(documents) == 0 {
-		return
-	}
-
-	c.processLock.Lock()
-	defer c.processLock.Unlock()
-
-	for _, doc := range documents {
-		if !c.processedUUIDs[doc.UUID] {
-			if _, exists := c.pendingDocuments[doc.UUID]; !exists {
-				c.pendingDocuments[doc.UUID] = doc
-				c.logStatus(
-					doc.UUID,
-					"WAITING",
-					"New document detected - Added to processing queue",
-				)
-			}
-		}
-	}
-}
-
 func (c *PDFProcessorClient) tryProcessDocument(doc Document, serverURL string) (bool, bool) {
 	c.processLock.Lock()
 
@@ -607,6 +585,7 @@ func (c *PDFProcessorClient) ProcessContinuously(ctx context.Context) {
 					success := c.processDocumentWithRotation(doc)
 					if success {
 						c.processLock.Lock()
+						delete(c.processedUUIDs, doc.UUID)
 						delete(c.pendingDocuments, doc.UUID)
 						c.processLock.Unlock()
 					} else {
